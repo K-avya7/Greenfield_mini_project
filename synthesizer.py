@@ -411,18 +411,34 @@ class HRDataSynthesizer:
         print("✓ Current records valid")
         print("✓ Historical date ranges valid")
 
-    # =========================================================
-    # 8. EXPORT & PIPELINE
+# =========================================================
+    # 8. EXPORT
     # =========================================================
 
     def save(self, df):
-        """Write final dataset to CSV."""
+        """Write final dataset to CSV, strictly ordering and filtering columns."""
         output_dir = os.path.dirname(self.output_file)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
-        df.to_csv(self.output_file, index=False)
-        print(f"\nSaved dataset to: {self.output_file}")
-
+            
+        # Define the exact columns matching the MySQL staging_employees table
+        final_cols = [
+            "employee_sk", "employee_id", "first_name", "last_name", "email", 
+            "age", "gender", "marital_status", "department", "job_role", 
+            "job_level", "education_field", "monthly_income", "daily_rate", 
+            "hourly_rate", "business_travel", "distance_from_home", 
+            "performance_rating", "attrition", "effective_start_date", 
+            "effective_end_date", "is_current", "change_reason", 
+            "years_with_curr_manager", "years_since_last_promotion", 
+            "years_at_company", "manager_id"
+        ]
+        
+        # Filter the DataFrame to ONLY include these columns in this exact order
+        df_export = df[final_cols]
+        
+        df_export.to_csv(self.output_file, index=False)
+        print(f"\nSaved clean dataset to: {self.output_file}")
+    
     def run(self):
         """Execute complete synthesis pipeline."""
         start_time = datetime.now()

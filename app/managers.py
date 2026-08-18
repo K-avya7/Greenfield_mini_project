@@ -403,6 +403,19 @@ class ProjectManager(BaseDAL):
                 proj.project_name, proj.department_id,
                 proj.start_date, proj.end_date, proj.status
             ))
+            
+            # ── STEP 2: Dual-write to dim_project (OLAP)
+            if rows > 0:
+                dim_sql = """
+                    INSERT INTO dim_project (project_id, project_name, start_date, end_date, status)
+                    VALUES (
+                        (SELECT project_id FROM projects WHERE project_name = %s ORDER BY project_id DESC LIMIT 1),
+                        %s, %s, %s, %s
+                    )
+                """
+                self.execute_write(dim_sql, (
+                    proj.project_name, proj.project_name, proj.start_date, proj.end_date, proj.status
+                ))
             if rows > 0:
                 return True, (
                     f"✅ Project '{proj.project_name}' created!\n\n"
@@ -455,6 +468,21 @@ class ProjectManager(BaseDAL):
                 employee_id, project_id, role_on_project,
                 allocation_ratio, assigned_date, end_date
             ))
+            
+            # ── STEP 2: Dual-write to dim_assignment (OLAP)
+            if rows > 0:
+                dim_sql = """
+                    INSERT INTO dim_assignment (assignment_id, employee_sk, project_sk, role_on_project, allocation_ratio, assigned_date, end_date)
+                    SELECT 
+                        (SELECT assignment_id FROM assignments WHERE employee_id = %s AND project_id = %s ORDER BY assignment_id DESC LIMIT 1),
+                        (SELECT employee_sk FROM dim_employee WHERE employee_id = %s AND is_current = 1 LIMIT 1),
+                        (SELECT project_sk FROM dim_project WHERE project_id = %s ORDER BY project_sk DESC LIMIT 1),
+                        %s, %s, %s, %s
+                """
+                self.execute_write(dim_sql, (
+                    employee_id, project_id, employee_id, project_id,
+                    role_on_project, allocation_ratio, assigned_date, end_date
+                ))
             if rows > 0:
                 return True, (
                     f"✅ Employee {employee_id} assigned to project {project_id}!\n\n"

@@ -1,21 +1,25 @@
-"""
-db_manager.py
-─────────────
-Singleton DatabaseConnection class.
-Loads credentials from .env and provides connections to hr_analytics_dw.
-"""
-
 import os
 import mysql.connector
 from mysql.connector import Error
 from dotenv import load_dotenv
+import streamlit as st
 
-load_dotenv()  # reads .env file
+load_dotenv()
+
+
+def get_credential(key: str, default: str = "") -> str:
+    """Fetch configuration from Streamlit Secrets first, falling back to os.getenv."""
+    try:
+        if key in st.secrets:
+            return str(st.secrets[key])
+    except Exception:
+        pass
+    return os.getenv(key, default)
 
 
 class DatabaseConnection:
     """
-    Singleton that manages a MySQL connection to hr_analytics_dw.
+    Singleton that manages a MySQL connection to Aiven or local DB.
     Only one instance is ever created (Singleton pattern).
     """
     _instance = None
@@ -23,14 +27,22 @@ class DatabaseConnection:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance._config = {
-                "host":     os.getenv("DB_HOST",     "127.0.0.1"),
-                "user":     os.getenv("DB_USER",     "root"),
-                "password": os.getenv("DB_PASSWORD", ""),
-                "database": os.getenv("DB_NAME",     "employee_analytics_dw2"),
-                "use_pure": os.getenv("DB_USE_PURE", "True") == "True",
-                "connection_timeout": int(os.getenv("DB_CONNECTION_TIMEOUT", "10")),
+            config = {
+                "host": get_credential("DB_HOST", "127.0.0.1"),
+                "port": int(get_credential("DB_PORT", "3306")),
+                "user": get_credential("DB_USER", "root"),
+                "password": get_credential("DB_PASSWORD", ""),
+                "database": get_credential("DB_NAME", "employee_analytics_dw2"),
+                "use_pure": get_credential("DB_USE_PURE", "True").lower() == "true",
+                "connection_timeout": int(get_credential("DB_CONNECTION_TIMEOUT", "10")),
             }
+
+            # Aiven MySQL requires SSL
+            ssl_mode = get_credential("DB_SSL_MODE", "")
+            if ssl_mode:
+                config["ssl_mode"] = ssl_mode
+
+            cls._instance._config = config
         return cls._instance
 
     # ── public API ─────────────────────────────────────────────

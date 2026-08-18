@@ -1,0 +1,321 @@
+
+-- ============================================================
+-- ETL Script: Move Data from Staging to OLTP Tables
+-- File: etl_staging_to_oltp.sql
+-- ============================================================
+
+USE hr_analytics_dw;
+
+-- ============================================================
+-- 0. Alter employee_job_history to support timeline
+-- ============================================================
+ALTER TABLE employee_job_history
+ADD COLUMN effective_start_date DATE,
+ADD COLUMN effective_end_date DATE,
+ADD COLUMN is_current TINYINT(1),
+ADD COLUMN change_reason VARCHAR(100);
+
+-- ============================================================
+-- 1. Populate departments (Lookup Table)
+-- ============================================================
+INSERT INTO departments (department_name)
+WITH unique_depts AS (
+    SELECT department,
+           ROW_NUMBER() OVER (PARTITION BY department ORDER BY department) as rn
+    FROM staging_employees
+    WHERE department IS NOT NULL
+)
+SELECT department
+FROM unique_depts
+WHERE rn = 1;
+
+-- ============================================================
+-- 2. Populate job_roles (Lookup Table)
+-- ============================================================
+INSERT INTO job_roles (job_role_name, job_level)
+WITH unique_roles AS (
+    SELECT job_role, job_level,
+           ROW_NUMBER() OVER (PARTITION BY job_role, job_level ORDER BY job_role) as rn
+    FROM staging_employees
+    WHERE job_role IS NOT NULL
+)
+SELECT job_role, job_level
+FROM unique_roles
+WHERE rn = 1;
+
+-- ============================================================
+-- 3. Populate employees (Current State)
+-- ============================================================
+-- Temporarily disable FK checks because managers might be inserted
+-- after their direct reports in this bulk insert.
+SET FOREIGN_KEY_CHECKS = 0;
+
+INSERT INTO employees (
+    employee_id,         -- We force the ID to match staging so manager_id links correctly!
+    employee_number, 
+    first_name, 
+    last_name, 
+    email, 
+    age, 
+    gender, 
+    marital_status,
+    education_field, 
+    distance_from_home, 
+    years_at_company, 
+    attrition,
+    department_id, 
+    job_role_id, 
+    manager_id
+)
+SELECT
+    s.employee_id,
+    s.employee_id AS employee_number,
+    s.first_name,
+    s.last_name,
+    s.email,
+    s.age,
+    s.gender,
+    s.marital_status,
+    s.education_field,
+    s.distance_from_home,
+    s.years_at_company,
+    s.attrition,
+    d.department_id,
+    j.job_role_id,
+    s.manager_id
+FROM staging_employees s
+JOIN departments d ON s.department = d.department_name
+JOIN job_roles j ON s.job_role = j.job_role_name AND s.job_level = j.job_level
+-- We only want the current version of the employee in the main table!
+WHERE s.is_current = 1;
+
+SET FOREIGN_KEY_CHECKS = 1;
+
+-- ============================================================
+-- 4. Populate employee_job_history (Full SCD2 History Log)
+-- ============================================================
+INSERT INTO employee_job_history (
+    employee_sk, 
+    employee_id, 
+    department_id, 
+    job_role_id, 
+    job_level,
+    monthly_income, 
+    daily_rate, 
+    hourly_rate, 
+    business_travel,
+    years_since_last_promotion, 
+    years_with_curr_manager,
+    effective_start_date, 
+    effective_end_date, 
+    is_current, 
+    change_reason
+)
+SELECT
+    s.employee_sk,
+    s.employee_id,
+    d.department_id,
+    j.job_role_id,
+    s.job_level,
+    s.monthly_income,
+    s.daily_rate,
+    s.hourly_rate,
+    s.business_travel,
+    s.years_since_last_promotion,
+    s.years_with_curr_manager,
+    s.effective_start_date,
+    s.effective_end_date,
+    s.is_current,
+    s.change_reason
+FROM staging_employees s
+JOIN departments d ON s.department = d.department_name
+JOIN job_roles j ON s.job_role = j.job_role_name AND s.job_level = j.job_level;
+
+-- ============================================================
+-- 5. Populate reviews (Synthesize from Staging Data)
+-- ============================================================
+INSERT INTO reviews (
+    employee_id, 
+    review_date, 
+    performance_rating
+)
+SELECT
+    employee_id,
+    effective_start_date AS review_date,
+    performance_rating
+FROM staging_employees
+WHERE performance_rating IS NOT NULL;
+
+-- ============================================================
+-- ETL Supplement: Populate projects + assignments from staging
+-- Add this to the end of etl_staging_to_oltp.sql
+-- ============================================================
+
+-- ============================================================
+-- Step 6: Populate projects
+-- Since staging has no project data, we SYNTHESIZE projects
+-- by creating 3 projects per department (9 total)
+-- Dates are derived from the date range in staging_employees
+-- ============================================================
+INSERT INTO projects (project_name, department_id, start_date, end_date, status)
+WITH dept_date_range AS (
+    -- Find the min and max dates per department from staging
+    SELECT
+        d.department_id,
+        d.department_name,
+        MIN(s.effective_start_date) AS dept_start,
+        MAX(s.effective_end_date)   AS dept_end
+    FROM staging_employees s
+    JOIN departments d ON d.department_name = s.department
+    GROUP BY d.department_id, d.department_name
+),
+generated_projects AS (
+    -- Generate 3 projects per department using UNION ALL
+    SELECT department_id, department_name, dept_start, dept_end,
+           CONCAT(department_name, ' - Initiative Alpha')  AS project_name,
+           'Completed'                                      AS status
+    FROM dept_date_range
+    UNION ALL
+    SELECT department_id, department_name, dept_start, dept_end,
+           CONCAT(department_name, ' - Initiative Beta'),
+           'Active'
+    FROM dept_date_range
+    UNION ALL
+    SELECT department_id, department_name, dept_start, dept_end,
+           CONCAT(department_name, ' - Initiative Gamma'),
+           'In Progress'
+    FROM dept_date_range
+)
+SELECT
+    project_name,
+    department_id,
+    dept_start  AS start_date,
+    dept_end    AS end_date,
+    status
+FROM generated_projects
+ORDER BY department_id;
+
+
+-- ============================================================
+-- Step 7: Populate assignments
+-- Each CURRENT employee is assigned to exactly ONE project
+-- that belongs to their own department.
+--
+-- CTE: employee_assignments
+--   - Joins employees -> departments -> projects
+--   - Gets role_on_project from their job_role_name
+--   - Gets dates from staging (their current version start/end)
+--   - Uses ROW_NUMBER() to pick ONE project per employee
+--     (avoids assigning same person to multiple projects)
+--   - Uses MOD(employee_id, 3)+1 to distribute employees
+--     evenly across the 3 projects in their department
+-- ============================================================
+-- ============================================================
+-- ETL Supplement: Populate projects + assignments from staging
+-- File: etl_populate_projects_assignments.sql
+-- FIX: Removed nested window function (Error 3595)
+--      Split into 2 CTEs instead
+-- ============================================================
+
+-- ============================================================
+-- Step 7: Populate assignments
+--
+-- FIX: Replaced nested window function with 2 CTEs:
+--
+--  CTE 1 - ranked_projects:
+--    Uses ROW_NUMBER() to give each project in a department
+--    a rank (1, 2, 3). This pre-ranks projects BEFORE we join.
+--
+--  CTE 2 - employee_assignments:
+--    For each employee, picks the project whose rank equals
+--    MOD(employee_id, 3) + 1.
+--    This distributes 100k employees evenly across 3 projects.
+--    No nesting needed at all!
+-- ============================================================
+INSERT INTO assignments (
+    employee_id,
+    project_id,
+    role_on_project,
+    allocation_ratio,
+    assigned_date,
+    end_date
+)
+WITH
+
+-- CTE 1: Rank the 3 projects inside each department as 1, 2, 3
+ranked_projects AS (
+    SELECT
+        project_id,
+        department_id,
+        ROW_NUMBER() OVER (
+            PARTITION BY department_id   -- reset count per department
+            ORDER BY project_id ASC      -- consistent ordering
+        )               AS proj_rank     -- will be 1, 2, or 3
+    FROM projects
+),
+
+-- CTE 2: Match each employee to exactly one project using MOD
+employee_assignments AS (
+    SELECT
+        e.employee_id,
+        rp.project_id,
+        j.job_role_name                                  AS role_on_project,
+        -- Allocation ratio varies by employee (full / part-time)
+        CASE MOD(e.employee_id, 3)
+            WHEN 0 THEN 1.00   -- full time
+            WHEN 1 THEN 0.75   -- 75%
+            ELSE        0.50   -- half time
+        END                                              AS allocation_ratio,
+        s.effective_start_date                           AS assigned_date,
+        -- Current employees have no end date (still on project)
+        CASE WHEN s.is_current = 1 THEN NULL
+             ELSE s.effective_end_date
+        END                                              AS end_date
+    FROM employees e
+    -- Join to the pre-ranked projects table
+    JOIN ranked_projects rp
+        ON  rp.department_id = e.department_id
+        -- Pick the project whose rank matches this employee's MOD value
+        AND rp.proj_rank     = MOD(e.employee_id, 3) + 1
+    JOIN job_roles j
+        ON  j.job_role_id    = e.job_role_id
+    JOIN staging_employees s
+        ON  s.employee_id    = e.employee_id
+        AND s.is_current     = 1
+)
+SELECT
+    employee_id,
+    project_id,
+    role_on_project,
+    allocation_ratio,
+    assigned_date,
+    end_date
+FROM employee_assignments
+ORDER BY employee_id;
+
+
+-- ============================================================
+-- Verification
+-- ============================================================
+SELECT 'projects'    AS TableName, COUNT(*) AS RowCount FROM projects
+UNION ALL
+SELECT 'assignments', COUNT(*) FROM assignments;
+
+-- ============================================================
+-- Verification
+-- ============================================================
+SELECT 'projects'    AS TableName, COUNT(*) AS RowCount FROM projects
+UNION ALL
+SELECT 'assignments', COUNT(*) FROM assignments;
+
+
+-- Verification
+SELECT 'departments' AS TableName, COUNT(*) AS RowCount FROM departments
+UNION ALL
+SELECT 'job_roles', COUNT(*) FROM job_roles
+UNION ALL
+SELECT 'employees', COUNT(*) FROM employees
+UNION ALL
+SELECT 'employee_job_history', COUNT(*) FROM employee_job_history
+UNION ALL
+SELECT 'reviews', COUNT(*) FROM reviews;

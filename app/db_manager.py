@@ -27,7 +27,8 @@ class DatabaseConnection:
                 "host":     os.getenv("DB_HOST",     "127.0.0.1"),
                 "user":     os.getenv("DB_USER",     "root"),
                 "password": os.getenv("DB_PASSWORD", ""),
-                "database": os.getenv("DB_NAME",     "hr_analytics_dw"),
+                "database": os.getenv("DB_NAME",     "employee_analytics_dw2"),
+                "use_pure": os.getenv("DB_USE_PURE", "True") == "True",
             }
         return cls._instance
 

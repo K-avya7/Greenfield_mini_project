@@ -5,9 +5,9 @@ DAL Manager classes inheriting from DatabaseConnection.
 
 BaseDAL         - raw execute helpers
 EmployeeManager - CRUD + SCD2 trigger on BOTH employees & employee_job_history
-ProjectManager  - project CRUD
+ProjectManager  - project CRUD + assignment CRUD
 ReviewManager   - review CRUD
-AnalyticsManager- OLAP read-only analytics (window functions)
+AnalyticsManager- OLAP read-only analytics (window functions, CTEs)
 
 ─────────────────────────────────────────────
 HOW "ONBOARD NEW EMPLOYEE" TOUCHES THE DB:
@@ -24,7 +24,6 @@ HOW "ONBOARD NEW EMPLOYEE" TOUCHES THE DB:
    job_roles    — must exist already (looked up by name)
    reviews      — added separately via "Submit Review" form
    projects     — added separately via "Create Project" form
-   assignments  — NOT handled via UI (populated by ETL)
 
 ─────────────────────────────────────────────
 HOW "CHANGE DEPARTMENT (SCD2)" TOUCHES THE DB:
@@ -86,6 +85,23 @@ class EmployeeManager(BaseDAL):
         except Exception:
             return []
 
+    def get_employees_for_dropdown(self, limit: int = 500) -> list[dict]:
+        """Return employee list for assignment dropdowns."""
+        try:
+            return self.execute_read(
+                """SELECT e.employee_id,
+                          CONCAT(e.first_name, ' ', e.last_name) AS name,
+                          d.department_name, j.job_role_name
+                   FROM employees e
+                   JOIN departments d ON d.department_id = e.department_id
+                   JOIN job_roles   j ON j.job_role_id   = e.job_role_id
+                   ORDER BY e.first_name, e.last_name
+                   LIMIT %s""",
+                (limit,)
+            )
+        except Exception:
+            return []
+
     # ── CREATE ──────────────────────────────────────────────────
     def create_employee(self, emp: Employee) -> tuple[bool, str]:
         """
@@ -112,19 +128,30 @@ class EmployeeManager(BaseDAL):
             # ── STEP 1: INSERT into employees ────────────────────
             emp_sql = """
                 INSERT INTO employees
-                    (employee_id, employee_number, first_name, last_name,
-                     email, age, gender, marital_status, education_field,
-                     distance_from_home, years_at_company, attrition,
-                     department_id, job_role_id, manager_id)
+                    (employee_id, employee_number, employee_name, first_name, last_name,
+                     email, age, gender, marital_status, education, education_field,
+                     distance_from_home, num_companies_worked, total_working_years,
+                     years_at_company, years_in_current_role, attrition,
+                     business_travel, over_time, stock_option_level, percent_salary_hike,
+                     environment_satisfaction, job_involvement, job_satisfaction,
+                     relationship_satisfaction, work_life_balance, training_times_last_year,
+                     monthly_income, daily_rate, hourly_rate, monthly_rate,
+                     employee_count, standard_hours, over_18, department_id, job_role_id, manager_id)
                 VALUES
-                    (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             self.execute_write(emp_sql, (
-                emp.employee_number, emp.employee_number,
+                emp.employee_number, emp.employee_number, emp.employee_name,
                 emp.first_name, emp.last_name, emp.email,
                 emp.age, emp.gender, emp.marital_status,
-                emp.education_field, emp.distance_from_home,
-                emp.years_at_company, emp.attrition,
+                emp.education, emp.education_field, emp.distance_from_home,
+                emp.num_companies_worked, emp.total_working_years,
+                emp.years_at_company, emp.years_in_current_role, emp.attrition,
+                emp.business_travel, emp.over_time, emp.stock_option_level, emp.percent_salary_hike,
+                emp.environment_satisfaction, emp.job_involvement, emp.job_satisfaction,
+                emp.relationship_satisfaction, emp.work_life_balance, emp.training_times_last_year,
+                emp.monthly_income, emp.daily_rate, emp.hourly_rate, emp.monthly_rate,
+                emp.employee_count, emp.standard_hours, emp.over_18,
                 emp.department_id, job_role_id,
                 emp.manager_id
             ))
@@ -134,16 +161,19 @@ class EmployeeManager(BaseDAL):
             hist_sql = """
                 INSERT INTO employee_job_history (
                     employee_sk, employee_id, department_id, job_role_id,
-                    job_level, monthly_income, daily_rate, hourly_rate,
-                    business_travel, years_since_last_promotion,
+                    job_level, monthly_income, daily_rate, hourly_rate, monthly_rate,
+                    business_travel, over_time, stock_option_level, percent_salary_hike,
+                    years_in_current_role, years_since_last_promotion,
                     years_with_curr_manager, effective_start_date,
                     effective_end_date, is_current, change_reason
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """
             self.execute_write(hist_sql, (
                 next_sk, emp.employee_number, emp.department_id, job_role_id,
-                emp.job_level, emp.monthly_income, 0, 0,
-                "Non-Travel", 0, 0,
+                emp.job_level, emp.monthly_income, emp.daily_rate, emp.hourly_rate, emp.monthly_rate,
+                emp.business_travel, emp.over_time, emp.stock_option_level, emp.percent_salary_hike,
+                emp.years_in_current_role, emp.years_since_last_promotion,
+                emp.years_with_curr_manager,
                 today, far_future, 1, "New Hire"
             ))
 
@@ -176,14 +206,34 @@ class EmployeeManager(BaseDAL):
         try:
             return self.execute_read(
                 """SELECT e.employee_id, e.first_name, e.last_name, e.email,
-                          e.age, e.attrition, e.years_at_company,
-                          d.department_name, j.job_role_name
+                          e.age, e.attrition, e.years_at_company, e.monthly_income,
+                          d.department_name, j.job_role_name, j.job_level
                    FROM employees e
                    JOIN departments d ON d.department_id = e.department_id
                    JOIN job_roles   j ON j.job_role_id   = e.job_role_id
                    ORDER BY e.employee_id DESC
                    LIMIT %s""",
                 (limit,)
+            )
+        except RuntimeError:
+            return []
+
+    def search_employees(self, name_fragment: str) -> list[dict]:
+        """Search employees by full name fragment."""
+        try:
+            return self.execute_read(
+                """SELECT e.employee_id,
+                          CONCAT(e.first_name, ' ', e.last_name) AS name,
+                          e.email, e.age, e.attrition,
+                          d.department_name, j.job_role_name, j.job_level,
+                          e.monthly_income
+                   FROM employees e
+                   JOIN departments d ON d.department_id = e.department_id
+                   JOIN job_roles   j ON j.job_role_id   = e.job_role_id
+                   WHERE CONCAT(e.first_name, ' ', e.last_name) LIKE %s
+                   ORDER BY e.first_name, e.last_name
+                   LIMIT 30""",
+                (f"%{name_fragment}%",)
             )
         except RuntimeError:
             return []
@@ -230,19 +280,27 @@ class EmployeeManager(BaseDAL):
 
             # ── STEP 2: Insert new active history row ───────────
             next_sk = self._next_employee_sk()
+            
+            # calculate rates based on new_income
+            new_daily_rate = max(1, round(new_income / 22))
+            new_hourly_rate = max(1, round(new_daily_rate / 8))
+            new_monthly_rate = round(new_income)
+            
             self.execute_write("""
                 INSERT INTO employee_job_history (
                     employee_sk, employee_id, department_id, job_role_id,
-                    job_level, monthly_income, daily_rate, hourly_rate,
-                    business_travel, years_since_last_promotion,
+                    job_level, monthly_income, daily_rate, hourly_rate, monthly_rate,
+                    business_travel, over_time, stock_option_level, percent_salary_hike,
+                    years_in_current_role, years_since_last_promotion,
                     years_with_curr_manager, effective_start_date,
                     effective_end_date, is_current, change_reason
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (
                 next_sk, employee_id, new_dept_id, job_role_id,
-                new_level, new_income, 0, 0,
-                "Non-Travel", 0, 0,
-                today, far_future, 1, change_reason
+                new_level, new_income, new_daily_rate, new_hourly_rate, new_monthly_rate,
+                "Non-Travel", "No", 0, 0,
+                0, 0,
+                0, today, far_future, 1, change_reason
             ))
 
             # ── STEP 3: Sync the employees table ────────────────
@@ -278,7 +336,7 @@ class EmployeeManager(BaseDAL):
 # PROJECT MANAGER
 # ═══════════════════════════════════════════════════════════════
 class ProjectManager(BaseDAL):
-    """CRUD for projects table."""
+    """CRUD for projects + assignments tables."""
 
     def create_project(self, proj: Project) -> tuple[bool, str]:
         try:
@@ -307,6 +365,66 @@ class ProjectManager(BaseDAL):
                    FROM projects p
                    JOIN departments d ON d.department_id = p.department_id
                    ORDER BY p.project_id DESC"""
+            )
+        except RuntimeError:
+            return []
+
+    def get_projects_for_dropdown(self) -> list[dict]:
+        """Return active/in-progress projects for assignment dropdown."""
+        try:
+            return self.execute_read(
+                """SELECT project_id, project_name, status
+                   FROM projects
+                   ORDER BY project_name"""
+            )
+        except RuntimeError:
+            return []
+
+    # ── ASSIGNMENTS ─────────────────────────────────────────────
+    def assign_employee(self,
+                        employee_id: int,
+                        project_id: int,
+                        role_on_project: str,
+                        allocation_ratio: float,
+                        assigned_date: date,
+                        end_date: date | None = None) -> tuple[bool, str]:
+        """Assign an employee to a project (inserts into assignments)."""
+        try:
+            sql = """
+                INSERT INTO assignments
+                    (employee_id, project_id, role_on_project,
+                     allocation_ratio, assigned_date, end_date)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """
+            rows = self.execute_write(sql, (
+                employee_id, project_id, role_on_project,
+                allocation_ratio, assigned_date, end_date
+            ))
+            if rows > 0:
+                return True, (
+                    f"✅ Employee {employee_id} assigned to project {project_id}!\n\n"
+                    f"• **assignments** → 1 row inserted\n"
+                    f"  role={role_on_project}, allocation={allocation_ratio}%"
+                )
+            return False, "❌ Insert returned 0 rows."
+        except RuntimeError as e:
+            return False, f"❌ DB error: {e}"
+
+    def get_all_assignments(self) -> list[dict]:
+        """Return all assignments with employee and project names."""
+        try:
+            return self.execute_read(
+                """SELECT a.assignment_id,
+                          CONCAT(e.first_name, ' ', e.last_name) AS employee_name,
+                          p.project_name,
+                          a.role_on_project,
+                          a.allocation_ratio,
+                          a.assigned_date,
+                          a.end_date
+                   FROM assignments a
+                   JOIN employees e ON e.employee_id = a.employee_id
+                   JOIN projects  p ON p.project_id  = a.project_id
+                   ORDER BY a.assignment_id DESC"""
             )
         except RuntimeError:
             return []
@@ -356,9 +474,10 @@ class ReviewManager(BaseDAL):
 class AnalyticsManager(BaseDAL):
     """
     Read-only analytics against the Star Schema (dim_* / fact_*).
-    All queries use CTEs and Window Functions.
+    All complex queries use CTEs and Window Functions.
     """
 
+    # ── KPIs ────────────────────────────────────────────────────
     def get_kpis(self) -> dict:
         try:
             rows = self.execute_read("""
@@ -376,6 +495,7 @@ class AnalyticsManager(BaseDAL):
         except RuntimeError:
             return {}
 
+    # ── TOP PERFORMERS (DENSE_RANK window function) ─────────────
     def get_top_performers(self, top_n: int = 3) -> list[dict]:
         """Top-N per dept using DENSE_RANK() window function."""
         try:
@@ -407,6 +527,7 @@ class AnalyticsManager(BaseDAL):
         except RuntimeError:
             return []
 
+    # ── YEAR-OVER-YEAR TREND ─────────────────────────────────────
     def get_yoy_trend(self) -> list[dict]:
         try:
             return self.execute_read("""
@@ -422,6 +543,44 @@ class AnalyticsManager(BaseDAL):
         except RuntimeError:
             return []
 
+    # ── YoY WITH LAG (advanced CTE + window function) ───────────
+    def get_yoy_with_delta(self) -> list[dict]:
+        """Year-over-year performance with LAG() to show change vs previous year."""
+        try:
+            return self.execute_read("""
+                WITH yearly AS (
+                    SELECT d.year,
+                           COUNT(f.review_sk) AS total_reviews,
+                           ROUND(AVG(f.performance_rating), 3) AS avg_performance
+                    FROM fact_performance_reviews f
+                    JOIN dim_date d ON d.date_sk = f.date_sk
+                    GROUP BY d.year
+                )
+                SELECT year, total_reviews, avg_performance,
+                       LAG(avg_performance) OVER (ORDER BY year) AS prev_year_avg,
+                       ROUND(avg_performance - LAG(avg_performance) OVER (ORDER BY year), 3) AS performance_change
+                FROM yearly
+                ORDER BY year
+            """)
+        except RuntimeError:
+            return []
+
+    # ── QUARTERLY TREND ──────────────────────────────────────────
+    def get_quarterly_trend(self) -> list[dict]:
+        try:
+            return self.execute_read("""
+                SELECT d.quarter,
+                       ROUND(AVG(f.performance_rating),3) AS avg_rating,
+                       COUNT(*) AS reviews
+                FROM fact_performance_reviews f
+                JOIN dim_date d ON d.date_sk = f.date_sk
+                GROUP BY d.quarter
+                ORDER BY d.quarter
+            """)
+        except RuntimeError:
+            return []
+
+    # ── DEPARTMENT SUMMARY ───────────────────────────────────────
     def get_department_summary(self) -> list[dict]:
         try:
             return self.execute_read("""
@@ -439,6 +598,7 @@ class AnalyticsManager(BaseDAL):
         except RuntimeError:
             return []
 
+    # ── ATTRITION RISK (OLTP-based for completeness) ─────────────
     def get_attrition_risk(self) -> list[dict]:
         try:
             return self.execute_read("""
@@ -451,6 +611,27 @@ class AnalyticsManager(BaseDAL):
         except RuntimeError:
             return []
 
+    # ── ATTRITION RATE % BY DEPARTMENT ──────────────────────────
+    def get_attrition_score_by_dept(self) -> list[dict]:
+        """Attrition rate % per department, ordered by risk."""
+        try:
+            return self.execute_read("""
+                SELECT d.department_name,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN e.attrition='Yes' THEN 1 ELSE 0 END) AS attrited,
+                       ROUND(
+                           100.0 * SUM(CASE WHEN e.attrition='Yes' THEN 1 ELSE 0 END) / COUNT(*),
+                           2
+                       ) AS attrition_rate_pct
+                FROM employees e
+                JOIN departments d ON d.department_id = e.department_id
+                GROUP BY d.department_name
+                ORDER BY attrition_rate_pct DESC
+            """)
+        except RuntimeError:
+            return []
+
+    # ── INCOME DISTRIBUTION ──────────────────────────────────────
     def get_income_distribution(self) -> list[dict]:
         try:
             return self.execute_read("""
@@ -462,6 +643,83 @@ class AnalyticsManager(BaseDAL):
         except RuntimeError:
             return []
 
+    # ── INCOME HEATMAP (dept × job_level) ───────────────────────
+    def get_income_heatmap_data(self) -> list[dict]:
+        """Avg income grouped by department × job_level for heatmap."""
+        try:
+            return self.execute_read("""
+                SELECT dd.department_name,
+                       de.job_level,
+                       ROUND(AVG(de.monthly_income), 0) AS avg_income,
+                       COUNT(*) AS employee_count
+                FROM dim_employee de
+                JOIN dim_department dd ON dd.department_sk = de.department_sk
+                WHERE de.is_current = 1
+                GROUP BY dd.department_name, de.job_level
+                ORDER BY dd.department_name, de.job_level
+            """)
+        except RuntimeError:
+            return []
+
+    # ── TOP EARNERS ──────────────────────────────────────────────
+    def get_top_earners(self, n: int = 20) -> list[dict]:
+        """Top N earners with department and role info."""
+        try:
+            return self.execute_read(f"""
+                SELECT CONCAT(e.first_name, ' ', e.last_name) AS employee_name,
+                       d.department_name,
+                       j.job_role_name,
+                       j.job_level,
+                       e.monthly_income
+                FROM employees e
+                JOIN departments d ON d.department_id = e.department_id
+                JOIN job_roles   j ON j.job_role_id   = e.job_role_id
+                ORDER BY e.monthly_income DESC
+                LIMIT {n}
+            """)
+        except RuntimeError:
+            return []
+
+    # ── HEADCOUNT GROWTH TREND ───────────────────────────────────
+    def get_headcount_trend(self) -> list[dict]:
+        """New employees per year based on earliest SCD2 effective_start_date."""
+        try:
+            return self.execute_read("""
+                SELECT YEAR(min_start) AS hire_year,
+                       COUNT(DISTINCT employee_id) AS new_employees
+                FROM (
+                    SELECT employee_id,
+                           MIN(effective_start_date) AS min_start
+                    FROM dim_employee
+                    GROUP BY employee_id
+                ) first_records
+                GROUP BY hire_year
+                ORDER BY hire_year
+            """)
+        except RuntimeError:
+            return []
+
+    # ── PROJECT BOTTLENECK ANALYSIS ──────────────────────────────
+    def get_project_bottleneck(self) -> list[dict]:
+        """Projects with employee assignment counts and avg allocation — bottleneck view."""
+        try:
+            return self.execute_read("""
+                SELECT p.project_name,
+                       COALESCE(d.department_name, 'Unknown') AS department_name,
+                       p.status,
+                       COUNT(a.assignment_id)                       AS assigned_employees,
+                       ROUND(COALESCE(AVG(a.allocation_ratio), 0), 2) AS avg_allocation_pct,
+                       ROUND(COALESCE(SUM(a.allocation_ratio), 0), 2) AS total_allocation_pct
+                FROM projects p
+                LEFT JOIN departments d  ON d.department_id = p.department_id
+                LEFT JOIN assignments a  ON a.project_id   = p.project_id
+                GROUP BY p.project_id, p.project_name, d.department_name, p.status
+                ORDER BY assigned_employees DESC, total_allocation_pct DESC
+            """)
+        except RuntimeError:
+            return []
+
+    # ── SCD2 HISTORY EXPLORER ────────────────────────────────────
     def get_scd2_history(self, employee_id: int) -> list[dict]:
         try:
             return self.execute_read("""
@@ -480,19 +738,5 @@ class AnalyticsManager(BaseDAL):
                 WHERE de.employee_id = %s
                 ORDER BY de.effective_start_date
             """, (employee_id,))
-        except RuntimeError:
-            return []
-
-    def get_quarterly_trend(self) -> list[dict]:
-        try:
-            return self.execute_read("""
-                SELECT d.quarter,
-                       ROUND(AVG(f.performance_rating),3) AS avg_rating,
-                       COUNT(*) AS reviews
-                FROM fact_performance_reviews f
-                JOIN dim_date d ON d.date_sk = f.date_sk
-                GROUP BY d.quarter
-                ORDER BY d.quarter
-            """)
         except RuntimeError:
             return []

@@ -214,6 +214,7 @@ try:
     proj_mgr    : ProjectManager   = _mgr["proj"]
     rev_mgr     : ReviewManager    = _mgr["rev"]
     analytics   : AnalyticsManager = _mgr["analytics"]
+    DatabaseConnection().execute_read("SELECT 1 AS ok")
     _db_ok = True
 except Exception as _db_err:
     _db_ok = False

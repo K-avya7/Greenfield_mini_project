@@ -177,6 +177,28 @@ class EmployeeManager(BaseDAL):
                 today, far_future, 1, "New Hire"
             ))
 
+            # ── STEP 3: INSERT Day-1 row directly into dim_employee (OLAP)
+            dim_emp_sql = """
+                INSERT INTO dim_employee (
+                    employee_sk, employee_id, department_sk, first_name, last_name, email, age, gender,
+                    marital_status, education_field, job_role, job_level, monthly_income, daily_rate, hourly_rate,
+                    business_travel, distance_from_home, years_with_curr_manager, years_since_last_promotion,
+                    years_at_company, attrition, manager_id, change_reason, effective_start_date, effective_end_date, is_current
+                ) VALUES (
+                    %s, %s, (SELECT department_sk FROM dim_department WHERE department_id = %s LIMIT 1),
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+            """
+            self.execute_write(dim_emp_sql, (
+                next_sk, emp.employee_number, emp.department_id,
+                emp.first_name, emp.last_name, emp.email, emp.age, emp.gender,
+                emp.marital_status, emp.education_field, emp.job_role, emp.job_level,
+                emp.monthly_income, emp.daily_rate, emp.hourly_rate, emp.business_travel,
+                emp.distance_from_home, emp.years_with_curr_manager, emp.years_since_last_promotion,
+                emp.years_at_company, emp.attrition, emp.manager_id, "New Hire",
+                today, far_future, 1
+            ))
+
             return True, (
                 f"✅ '{emp.full_name}' onboarded successfully!\n\n"
                 f"• **employees** → 1 row inserted (current state)\n"
@@ -248,7 +270,7 @@ class EmployeeManager(BaseDAL):
         """
         SCD Type 2 update: changing an employee's department/role.
 
-        Touches employee_job_history TWICE:
+        Touches employee_job_history AND dim_employee TWICE:
           Step 1 → UPDATE old row  (set is_current=0, effective_end_date=yesterday)
           Step 2 → INSERT new row  (new dept/role, is_current=1, start=today)
 
@@ -266,6 +288,15 @@ class EmployeeManager(BaseDAL):
             # ── STEP 1: Expire the current history row ───────────
             expired = self.execute_write("""
                 UPDATE employee_job_history
+                SET    is_current = 0,
+                       effective_end_date = %s
+                WHERE  employee_id = %s
+                  AND  is_current  = 1
+            """, (yesterday, employee_id))
+
+            # Also expire the current row in dim_employee
+            self.execute_write("""
+                UPDATE dim_employee
                 SET    is_current = 0,
                        effective_end_date = %s
                 WHERE  employee_id = %s
@@ -301,6 +332,30 @@ class EmployeeManager(BaseDAL):
                 "Non-Travel", "No", 0, 0,
                 0, 0,
                 0, today, far_future, 1, change_reason
+            ))
+
+            # Insert new active row into dim_employee copying over immutable fields from expired row
+            dim_emp_sql = """
+                INSERT INTO dim_employee (
+                    employee_sk, employee_id, department_sk, first_name, last_name, email, age, gender,
+                    marital_status, education_field, job_role, job_level, monthly_income, daily_rate, hourly_rate,
+                    business_travel, distance_from_home, years_with_curr_manager, years_since_last_promotion,
+                    years_at_company, attrition, manager_id, change_reason, effective_start_date, effective_end_date, is_current
+                )
+                SELECT
+                    %s, e.employee_id, (SELECT department_sk FROM dim_department WHERE department_id = %s LIMIT 1),
+                    e.first_name, e.last_name, e.email, e.age, e.gender, e.marital_status, e.education_field,
+                    %s, %s, %s, %s, %s, e.business_travel, e.distance_from_home,
+                    e.years_with_curr_manager, e.years_since_last_promotion, e.years_at_company, e.attrition,
+                    e.manager_id, %s, %s, %s, 1
+                FROM dim_employee e
+                WHERE e.employee_id = %s
+                ORDER BY e.effective_end_date DESC
+                LIMIT 1
+            """
+            self.execute_write(dim_emp_sql, (
+                next_sk, new_dept_id, new_role, new_level, new_income, new_daily_rate, new_hourly_rate,
+                change_reason, today, far_future, employee_id
             ))
 
             # ── STEP 3: Sync the employees table ────────────────
@@ -348,6 +403,19 @@ class ProjectManager(BaseDAL):
                 proj.project_name, proj.department_id,
                 proj.start_date, proj.end_date, proj.status
             ))
+            
+            # ── STEP 2: Dual-write to dim_project (OLAP)
+            if rows > 0:
+                dim_sql = """
+                    INSERT INTO dim_project (project_id, project_name, start_date, end_date, status)
+                    VALUES (
+                        (SELECT project_id FROM projects WHERE project_name = %s ORDER BY project_id DESC LIMIT 1),
+                        %s, %s, %s, %s
+                    )
+                """
+                self.execute_write(dim_sql, (
+                    proj.project_name, proj.project_name, proj.start_date, proj.end_date, proj.status
+                ))
             if rows > 0:
                 return True, (
                     f"✅ Project '{proj.project_name}' created!\n\n"
@@ -400,6 +468,21 @@ class ProjectManager(BaseDAL):
                 employee_id, project_id, role_on_project,
                 allocation_ratio, assigned_date, end_date
             ))
+            
+            # ── STEP 2: Dual-write to dim_assignment (OLAP)
+            if rows > 0:
+                dim_sql = """
+                    INSERT INTO dim_assignment (assignment_id, employee_sk, project_sk, role_on_project, allocation_ratio, assigned_date, end_date)
+                    SELECT 
+                        (SELECT assignment_id FROM assignments WHERE employee_id = %s AND project_id = %s ORDER BY assignment_id DESC LIMIT 1),
+                        (SELECT employee_sk FROM dim_employee WHERE employee_id = %s AND is_current = 1 LIMIT 1),
+                        (SELECT project_sk FROM dim_project WHERE project_id = %s ORDER BY project_sk DESC LIMIT 1),
+                        %s, %s, %s, %s
+                """
+                self.execute_write(dim_sql, (
+                    employee_id, project_id, employee_id, project_id,
+                    role_on_project, allocation_ratio, assigned_date, end_date
+                ))
             if rows > 0:
                 return True, (
                     f"✅ Employee {employee_id} assigned to project {project_id}!\n\n"

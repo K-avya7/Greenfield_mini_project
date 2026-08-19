@@ -59,7 +59,7 @@ BEGIN
     ORDER BY project_sk DESC 
     LIMIT 1;
 
-    -- Insert into the Fact Table
+    -- Insert into the Dimensional Table
     IF v_emp_sk IS NOT NULL AND v_proj_sk IS NOT NULL THEN
         INSERT INTO dim_assignment (
             assignment_id, 

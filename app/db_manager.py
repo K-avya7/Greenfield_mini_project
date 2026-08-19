@@ -29,6 +29,7 @@ class DatabaseConnection:
                 "password": os.getenv("DB_PASSWORD", ""),
                 "port":     int(os.getenv("DB_PORT",     "3306")),
                 "database": os.getenv("DB_NAME",     "employee_analytics_dw2"),
+                "use_pure": os.getenv("DB_USE_PURE", "True") == "True",
                 "connection_timeout": int(os.getenv("DB_CONNECTION_TIMEOUT", "20")),
             }
         return cls._instance

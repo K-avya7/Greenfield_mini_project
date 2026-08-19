@@ -282,10 +282,6 @@ class EmployeeManager(BaseDAL):
         """
         SCD Type 2 update: changing an employee's department/role.
 
-        Touches employee_job_history AND dim_employee TWICE:
-          Step 1 → UPDATE old row  (set is_current=0, effective_end_date=yesterday)
-          Step 2 → INSERT new row  (new dept/role, is_current=1, start=today)
-
         Also updates the employees table (step 3) with the new IDs.
         """
         today     = date.today().isoformat()

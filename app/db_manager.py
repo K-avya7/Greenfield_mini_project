@@ -28,10 +28,10 @@ class DatabaseConnection:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._config = {
-                "host": get_setting("DB_HOST", "127.0.0.1"),
-                "user": get_setting("DB_USER", "root"),
+                "host": get_setting("DB_HOST", "mysql-greenfield-borkarvaishnavi45-f9ff.e.aivencloud.com"),
+                "user": get_setting("DB_USER", "avnadmin"),
                 "password": str(get_setting("DB_PASSWORD", "")),
-                "port": int(get_setting("DB_PORT", "3306")),
+                "port": int(get_setting("DB_PORT", "12047")),
                 "database": get_setting("DB_NAME", "employee_analytics_dw2"),
                 "use_pure": str(get_setting("DB_USE_PURE", "True")).lower() == "true",
                 "ssl_disabled": False,  # Enforces SSL connection required by Aiven

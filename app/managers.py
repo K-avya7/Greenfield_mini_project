@@ -192,12 +192,12 @@ class EmployeeManager(BaseDAL):
             # ── STEP 3: INSERT Day-1 row directly into dim_employee (OLAP)
             dim_emp_sql = """
                 INSERT INTO dim_employee (
-                    employee_sk, employee_id, department_sk, first_name, last_name, email, age, gender,
+                    employee_sk, employee_id, department_name, first_name, last_name, email, age, gender,
                     marital_status, education_field, job_role, job_level, monthly_income, daily_rate, hourly_rate,
                     business_travel, distance_from_home, years_with_curr_manager, years_since_last_promotion,
                     years_at_company, attrition, manager_id, change_reason, effective_start_date, effective_end_date, is_current
                 ) VALUES (
-                    %s, %s, (SELECT department_sk FROM dim_department WHERE department_id = %s LIMIT 1),
+                    %s, %s, (SELECT department_name FROM departments WHERE department_id = %s LIMIT 1),
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
             """
@@ -349,13 +349,13 @@ class EmployeeManager(BaseDAL):
             # Insert new active row into dim_employee copying over immutable fields from expired row
             dim_emp_sql = """
                 INSERT INTO dim_employee (
-                    employee_sk, employee_id, department_sk, first_name, last_name, email, age, gender,
+                    employee_sk, employee_id, department_name, first_name, last_name, email, age, gender,
                     marital_status, education_field, job_role, job_level, monthly_income, daily_rate, hourly_rate,
                     business_travel, distance_from_home, years_with_curr_manager, years_since_last_promotion,
                     years_at_company, attrition, manager_id, change_reason, effective_start_date, effective_end_date, is_current
                 )
                 SELECT
-                    %s, e.employee_id, (SELECT department_sk FROM dim_department WHERE department_id = %s LIMIT 1),
+                    %s, e.employee_id, (SELECT department_name FROM departments WHERE department_id = %s LIMIT 1),
                     e.first_name, e.last_name, e.email, e.age, e.gender, e.marital_status, e.education_field,
                     %s, %s, %s, %s, %s, e.business_travel, e.distance_from_home,
                     e.years_with_curr_manager, e.years_since_last_promotion, e.years_at_company, e.attrition,
@@ -422,18 +422,6 @@ class ProjectManager(BaseDAL):
                 proj.start_date, proj.end_date, proj.status
             ))
             
-            # ── STEP 2: Dual-write to dim_project (OLAP)
-            if rows > 0:
-                dim_sql = """
-                    INSERT INTO dim_project (project_id, project_name, start_date, end_date, status)
-                    VALUES (
-                        (SELECT project_id FROM projects WHERE project_name = %s ORDER BY project_id DESC LIMIT 1),
-                        %s, %s, %s, %s
-                    )
-                """
-                self.execute_write(dim_sql, (
-                    proj.project_name, proj.project_name, proj.start_date, proj.end_date, proj.status
-                ))
             if rows > 0:
                 return True, (
                     f"✅ Project '{proj.project_name}' created!\n\n"
@@ -493,20 +481,6 @@ class ProjectManager(BaseDAL):
                 allocation_ratio, assigned_date, end_date
             ))
             
-            # ── STEP 2: Dual-write to dim_assignment (OLAP)
-            if rows > 0:
-                dim_sql = """
-                    INSERT INTO dim_assignment (assignment_id, employee_sk, project_sk, role_on_project, allocation_ratio, assigned_date, end_date)
-                    SELECT 
-                        (SELECT assignment_id FROM assignments WHERE employee_id = %s AND project_id = %s ORDER BY assignment_id DESC LIMIT 1),
-                        (SELECT employee_sk FROM dim_employee WHERE employee_id = %s AND is_current = 1 LIMIT 1),
-                        (SELECT project_sk FROM dim_project WHERE project_id = %s ORDER BY project_sk DESC LIMIT 1),
-                        %s, %s, %s, %s
-                """
-                self.execute_write(dim_sql, (
-                    employee_id, project_id, employee_id, project_id,
-                    role_on_project, allocation_ratio, assigned_date, end_date
-                ))
             if rows > 0:
                 return True, (
                     f"✅ Employee {employee_id} assigned to project {project_id}!\n\n"
@@ -691,15 +665,14 @@ class AnalyticsManager(BaseDAL):
     def get_department_summary(self) -> list[dict]:
         try:
             return self.execute_read("""
-                SELECT dept.department_name,
+                SELECT de.department_name,
                        COUNT(DISTINCT de.employee_id)      AS headcount,
                        ROUND(AVG(de.monthly_income),0)     AS avg_income,
                        ROUND(AVG(f.performance_rating),2)  AS avg_rating
                 FROM dim_employee de
-                JOIN dim_department dept ON dept.department_sk = de.department_sk
                 LEFT JOIN fact_performance_reviews f ON f.employee_sk = de.employee_sk
                 WHERE de.is_current = 1
-                GROUP BY dept.department_name
+                GROUP BY de.department_name
                 ORDER BY avg_rating DESC
             """)
         except RuntimeError:
@@ -833,7 +806,7 @@ class AnalyticsManager(BaseDAL):
                 SELECT
                     de.employee_sk,
                     CONCAT(de.first_name,' ',de.last_name) AS name,
-                    dd.department_name,
+                    de.department_name,
                     de.job_role, de.job_level,
                     de.monthly_income,
                     de.change_reason,
@@ -841,7 +814,6 @@ class AnalyticsManager(BaseDAL):
                     de.effective_end_date,
                     IF(de.is_current=1,'✅ Current','📜 History') AS status
                 FROM dim_employee de
-                JOIN dim_department dd ON dd.department_sk = de.department_sk
                 WHERE de.employee_id = %s
                 ORDER BY de.effective_start_date
             """, (employee_id,))

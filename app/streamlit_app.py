@@ -977,6 +977,7 @@ elif page == "⭐ Reviews & Analytics":
                                   line=dict(width=2.5, color="#6366f1"),
                                   fillcolor="rgba(99,102,241,0.15)")
             fig_hc.update_layout(**_chart_layout())
+            fig_hc.update_xaxes(dtick=1)
             st.plotly_chart(fig_hc, use_container_width=True)
         else:
             _no_data("Headcount Trend (run OLAP ETL first)")

@@ -125,6 +125,18 @@ class EmployeeManager(BaseDAL):
                     f"Please pick a role that exists in the database."
                 )
 
+            # ── Basic Input Validation ───────────────────────────
+            if not emp.first_name or not emp.first_name.strip():
+                return False, "Validation Error: First name cannot be empty."
+            if not emp.last_name or not emp.last_name.strip():
+                return False, "Validation Error: Last name cannot be empty."
+            if "@" not in emp.email or "." not in emp.email:
+                return False, "Validation Error: Invalid email address format."
+            if emp.age < 18:
+                return False, "Validation Error: Employee must be at least 18 years old."
+            if emp.monthly_income <= 0:
+                return False, "Validation Error: Monthly income must be greater than 0."
+
             # ── STEP 1: INSERT into employees ────────────────────
             emp_sql = """
                 INSERT INTO employees
@@ -394,6 +406,12 @@ class ProjectManager(BaseDAL):
     """CRUD for projects + assignments tables."""
 
     def create_project(self, proj: Project) -> tuple[bool, str]:
+        # ── Basic Input Validation ──────────────────────────────
+        if not proj.project_name or not proj.project_name.strip():
+            return False, "Validation Error: Project name cannot be empty."
+        if proj.end_date and proj.end_date < proj.start_date:
+            return False, "Validation Error: End date cannot be earlier than start date."
+
         try:
             sql = """
                 INSERT INTO projects (project_name, department_id, start_date, end_date, status)
@@ -457,6 +475,12 @@ class ProjectManager(BaseDAL):
                         assigned_date: date,
                         end_date: date | None = None) -> tuple[bool, str]:
         """Assign an employee to a project (inserts into assignments)."""
+        # ── Basic Input Validation ──────────────────────────────
+        if allocation_ratio <= 0 or allocation_ratio > 100:
+            return False, "Validation Error: Allocation ratio must be between 1 and 100."
+        if end_date and end_date < assigned_date:
+            return False, "Validation Error: End date cannot be before assigned date."
+        
         try:
             sql = """
                 INSERT INTO assignments

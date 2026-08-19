@@ -34,6 +34,7 @@ class DatabaseConnection:
                 "port": int(get_setting("DB_PORT", "3306")),
                 "database": get_setting("DB_NAME", "employee_analytics_dw2"),
                 "use_pure": str(get_setting("DB_USE_PURE", "True")).lower() == "true",
+                "ssl_disabled": False,  # Enforces SSL connection required by Aiven
                 "connection_timeout": int(get_setting("DB_CONNECTION_TIMEOUT", "20")),
             }
         return cls._instance

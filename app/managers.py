@@ -708,12 +708,12 @@ class AnalyticsManager(BaseDAL):
             return []
 
     # ── INCOME DISTRIBUTION ──────────────────────────────────────
+# ── INCOME DISTRIBUTION ──────────────────────────────────────
     def get_income_distribution(self) -> list[dict]:
         try:
             return self.execute_read("""
-                SELECT dd.department_name, de.job_role, de.monthly_income
+                SELECT de.department_name, de.job_role, de.monthly_income
                 FROM dim_employee de
-                JOIN dim_department dd ON dd.department_sk = de.department_sk
                 WHERE de.is_current = 1
             """)
         except RuntimeError:
@@ -721,18 +721,24 @@ class AnalyticsManager(BaseDAL):
 
     # ── INCOME HEATMAP (dept × job_level) ───────────────────────
     def get_income_heatmap_data(self) -> list[dict]:
-        """Avg income grouped by department × job_level for heatmap."""
+        """
+        Average monthly income grouped by department and job level.
+        Used for income heatmap visualization.
+        """
         try:
             return self.execute_read("""
-                SELECT dd.department_name,
-                       de.job_level,
-                       ROUND(AVG(de.monthly_income), 0) AS avg_income,
-                       COUNT(*) AS employee_count
+                SELECT
+                    de.department_name ,de.job_level,
+                    ROUND(AVG(de.monthly_income), 0) AS avg_income,
+                    COUNT(*) AS employee_count
                 FROM dim_employee de
-                JOIN dim_department dd ON dd.department_sk = de.department_sk
                 WHERE de.is_current = 1
-                GROUP BY dd.department_name, de.job_level
-                ORDER BY dd.department_name, de.job_level
+                GROUP BY
+                    de.department_name,
+                    de.job_level
+                ORDER BY
+                    de.department_name,
+                    de.job_level
             """)
         except RuntimeError:
             return []

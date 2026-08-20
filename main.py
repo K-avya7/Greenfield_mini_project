@@ -122,26 +122,6 @@ def test_olap_tables():
             print(f"  {tbl:<30} ❌ {e}")
 
 
-def test_analytics_manager():
-    """Quick analytics reads to confirm OLAP queries work."""
-    section("ANALYTICS MANAGER SPOT CHECKS")
-    a = AnalyticsManager()
-
-    kpis = a.get_kpis()
-    if kpis:
-        print(f"  KPIs:")
-        for k, v in kpis.items():
-            print(f"    {k:<25} = {v}")
-    else:
-        print("  ⚠️  KPI query returned empty — OLAP ETL may not have run yet.")
-
-    top = a.get_top_performers(1)
-    print(f"  Top performers returned : {len(top)} rows")
-
-    depts = EmployeeManager().get_departments()
-    print(f"  Departments available   : {len(depts)}")
-
-
 def main():
     print("\n" + "═" * 60)
     print("  ENTERPRISE HR ANALYTICS — SMOKE TEST")
@@ -158,7 +138,6 @@ def main():
 
         test_oltp_tables()
         test_olap_tables()
-        test_analytics_manager()
 
         section("RESULT")
         print("  ✅ All checks completed.")

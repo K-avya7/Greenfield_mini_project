@@ -1,21 +1,25 @@
-"""
-db_manager.py
-─────────────
-Singleton DatabaseConnection class.
-Loads credentials from .env and provides connections to hr_analytics_dw.
-"""
-
 import os
 import mysql.connector
 from mysql.connector import Error
 from dotenv import load_dotenv
 
-load_dotenv()  # reads .env file
+load_dotenv()  # Reads .env file for local testing
+
+
+def get_setting(key: str, default: str = ""):
+    """Retrieve configuration from Streamlit secrets first, then OS environment variables."""
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.getenv(key, default)
 
 
 class DatabaseConnection:
     """
-    Singleton that manages a MySQL connection to hr_analytics_dw.
+    Singleton that manages a MySQL connection to hr_analytics_dw / Aiven.
     Only one instance is ever created (Singleton pattern).
     """
     _instance = None
@@ -24,11 +28,14 @@ class DatabaseConnection:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._config = {
-                "host":     os.getenv("DB_HOST",     "127.0.0.1"),
-                "user":     os.getenv("DB_USER",     "root"),
-                "password": os.getenv("DB_PASSWORD", ""),
-                "database": os.getenv("DB_NAME",     "employee_analytics_dw2"),
-                "use_pure": os.getenv("DB_USE_PURE", "True") == "True",
+                "host": get_setting("DB_HOST", "mysql-greenfield-borkarvaishnavi45-f9ff.e.aivencloud.com"),
+                "user": get_setting("DB_USER", "avnadmin"),
+                "password": str(get_setting("DB_PASSWORD", "")),
+                "port": int(get_setting("DB_PORT", "12047")),
+                "database": get_setting("DB_NAME", "employee_analytics_dw2"),
+                "use_pure": str(get_setting("DB_USE_PURE", "True")).lower() == "true",
+                "ssl_disabled": False,  # Enforces SSL connection required by Aiven
+                "connection_timeout": int(get_setting("DB_CONNECTION_TIMEOUT", "20")),
             }
         return cls._instance
 

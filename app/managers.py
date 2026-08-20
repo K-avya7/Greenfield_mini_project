@@ -125,6 +125,18 @@ class EmployeeManager(BaseDAL):
                     f"Please pick a role that exists in the database."
                 )
 
+            # ── Basic Input Validation ───────────────────────────
+            if not emp.first_name or not emp.first_name.strip():
+                return False, "Validation Error: First name cannot be empty."
+            if not emp.last_name or not emp.last_name.strip():
+                return False, "Validation Error: Last name cannot be empty."
+            if "@" not in emp.email or "." not in emp.email:
+                return False, "Validation Error: Invalid email address format."
+            if emp.age < 18:
+                return False, "Validation Error: Employee must be at least 18 years old."
+            if emp.monthly_income <= 0:
+                return False, "Validation Error: Monthly income must be greater than 0."
+
             # ── STEP 1: INSERT into employees ────────────────────
             emp_sql = """
                 INSERT INTO employees
@@ -175,6 +187,28 @@ class EmployeeManager(BaseDAL):
                 emp.years_in_current_role, emp.years_since_last_promotion,
                 emp.years_with_curr_manager,
                 today, far_future, 1, "New Hire"
+            ))
+
+            # ── STEP 3: INSERT Day-1 row directly into dim_employee (OLAP)
+            dim_emp_sql = """
+                INSERT INTO dim_employee (
+                    employee_sk, employee_id, department_name, first_name, last_name, email, age, gender,
+                    marital_status, education_field, job_role, job_level, monthly_income, daily_rate, hourly_rate,
+                    business_travel, distance_from_home, years_with_curr_manager, years_since_last_promotion,
+                    years_at_company, attrition, manager_id, change_reason, effective_start_date, effective_end_date, is_current
+                ) VALUES (
+                    %s, %s, (SELECT department_name FROM departments WHERE department_id = %s LIMIT 1),
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+            """
+            self.execute_write(dim_emp_sql, (
+                next_sk, emp.employee_number, emp.department_id,
+                emp.first_name, emp.last_name, emp.email, emp.age, emp.gender,
+                emp.marital_status, emp.education_field, emp.job_role, emp.job_level,
+                emp.monthly_income, emp.daily_rate, emp.hourly_rate, emp.business_travel,
+                emp.distance_from_home, emp.years_with_curr_manager, emp.years_since_last_promotion,
+                emp.years_at_company, emp.attrition, emp.manager_id, "New Hire",
+                today, far_future, 1
             ))
 
             return True, (
@@ -248,10 +282,6 @@ class EmployeeManager(BaseDAL):
         """
         SCD Type 2 update: changing an employee's department/role.
 
-        Touches employee_job_history TWICE:
-          Step 1 → UPDATE old row  (set is_current=0, effective_end_date=yesterday)
-          Step 2 → INSERT new row  (new dept/role, is_current=1, start=today)
-
         Also updates the employees table (step 3) with the new IDs.
         """
         today     = date.today().isoformat()
@@ -266,6 +296,15 @@ class EmployeeManager(BaseDAL):
             # ── STEP 1: Expire the current history row ───────────
             expired = self.execute_write("""
                 UPDATE employee_job_history
+                SET    is_current = 0,
+                       effective_end_date = %s
+                WHERE  employee_id = %s
+                  AND  is_current  = 1
+            """, (yesterday, employee_id))
+
+            # Also expire the current row in dim_employee
+            self.execute_write("""
+                UPDATE dim_employee
                 SET    is_current = 0,
                        effective_end_date = %s
                 WHERE  employee_id = %s
@@ -301,6 +340,30 @@ class EmployeeManager(BaseDAL):
                 "Non-Travel", "No", 0, 0,
                 0, 0,
                 0, today, far_future, 1, change_reason
+            ))
+
+            # Insert new active row into dim_employee copying over immutable fields from expired row
+            dim_emp_sql = """
+                INSERT INTO dim_employee (
+                    employee_sk, employee_id, department_name, first_name, last_name, email, age, gender,
+                    marital_status, education_field, job_role, job_level, monthly_income, daily_rate, hourly_rate,
+                    business_travel, distance_from_home, years_with_curr_manager, years_since_last_promotion,
+                    years_at_company, attrition, manager_id, change_reason, effective_start_date, effective_end_date, is_current
+                )
+                SELECT
+                    %s, e.employee_id, (SELECT department_name FROM departments WHERE department_id = %s LIMIT 1),
+                    e.first_name, e.last_name, e.email, e.age, e.gender, e.marital_status, e.education_field,
+                    %s, %s, %s, %s, %s, e.business_travel, e.distance_from_home,
+                    e.years_with_curr_manager, e.years_since_last_promotion, e.years_at_company, e.attrition,
+                    e.manager_id, %s, %s, %s, 1
+                FROM dim_employee e
+                WHERE e.employee_id = %s
+                ORDER BY e.effective_end_date DESC
+                LIMIT 1
+            """
+            self.execute_write(dim_emp_sql, (
+                next_sk, new_dept_id, new_role, new_level, new_income, new_daily_rate, new_hourly_rate,
+                change_reason, today, far_future, employee_id
             ))
 
             # ── STEP 3: Sync the employees table ────────────────
@@ -339,6 +402,12 @@ class ProjectManager(BaseDAL):
     """CRUD for projects + assignments tables."""
 
     def create_project(self, proj: Project) -> tuple[bool, str]:
+        # ── Basic Input Validation ──────────────────────────────
+        if not proj.project_name or not proj.project_name.strip():
+            return False, "Validation Error: Project name cannot be empty."
+        if proj.end_date and proj.end_date < proj.start_date:
+            return False, "Validation Error: End date cannot be earlier than start date."
+
         try:
             sql = """
                 INSERT INTO projects (project_name, department_id, start_date, end_date, status)
@@ -348,6 +417,7 @@ class ProjectManager(BaseDAL):
                 proj.project_name, proj.department_id,
                 proj.start_date, proj.end_date, proj.status
             ))
+            
             if rows > 0:
                 return True, (
                     f"✅ Project '{proj.project_name}' created!\n\n"
@@ -389,6 +459,12 @@ class ProjectManager(BaseDAL):
                         assigned_date: date,
                         end_date: date | None = None) -> tuple[bool, str]:
         """Assign an employee to a project (inserts into assignments)."""
+        # ── Basic Input Validation ──────────────────────────────
+        if allocation_ratio <= 0 or allocation_ratio > 100:
+            return False, "Validation Error: Allocation ratio must be between 1 and 100."
+        if end_date and end_date < assigned_date:
+            return False, "Validation Error: End date cannot be before assigned date."
+        
         try:
             sql = """
                 INSERT INTO assignments
@@ -400,6 +476,7 @@ class ProjectManager(BaseDAL):
                 employee_id, project_id, role_on_project,
                 allocation_ratio, assigned_date, end_date
             ))
+            
             if rows > 0:
                 return True, (
                     f"✅ Employee {employee_id} assigned to project {project_id}!\n\n"
@@ -584,15 +661,14 @@ class AnalyticsManager(BaseDAL):
     def get_department_summary(self) -> list[dict]:
         try:
             return self.execute_read("""
-                SELECT dept.department_name,
+                SELECT de.department_name,
                        COUNT(DISTINCT de.employee_id)      AS headcount,
                        ROUND(AVG(de.monthly_income),0)     AS avg_income,
                        ROUND(AVG(f.performance_rating),2)  AS avg_rating
                 FROM dim_employee de
-                JOIN dim_department dept ON dept.department_sk = de.department_sk
                 LEFT JOIN fact_performance_reviews f ON f.employee_sk = de.employee_sk
                 WHERE de.is_current = 1
-                GROUP BY dept.department_name
+                GROUP BY de.department_name
                 ORDER BY avg_rating DESC
             """)
         except RuntimeError:
@@ -632,12 +708,12 @@ class AnalyticsManager(BaseDAL):
             return []
 
     # ── INCOME DISTRIBUTION ──────────────────────────────────────
+# ── INCOME DISTRIBUTION ──────────────────────────────────────
     def get_income_distribution(self) -> list[dict]:
         try:
             return self.execute_read("""
-                SELECT dd.department_name, de.job_role, de.monthly_income
+                SELECT de.department_name, de.job_role, de.monthly_income
                 FROM dim_employee de
-                JOIN dim_department dd ON dd.department_sk = de.department_sk
                 WHERE de.is_current = 1
             """)
         except RuntimeError:
@@ -645,18 +721,24 @@ class AnalyticsManager(BaseDAL):
 
     # ── INCOME HEATMAP (dept × job_level) ───────────────────────
     def get_income_heatmap_data(self) -> list[dict]:
-        """Avg income grouped by department × job_level for heatmap."""
+        """
+        Average monthly income grouped by department and job level.
+        Used for income heatmap visualization.
+        """
         try:
             return self.execute_read("""
-                SELECT dd.department_name,
-                       de.job_level,
-                       ROUND(AVG(de.monthly_income), 0) AS avg_income,
-                       COUNT(*) AS employee_count
+                SELECT
+                    de.department_name ,de.job_level,
+                    ROUND(AVG(de.monthly_income), 0) AS avg_income,
+                    COUNT(*) AS employee_count
                 FROM dim_employee de
-                JOIN dim_department dd ON dd.department_sk = de.department_sk
                 WHERE de.is_current = 1
-                GROUP BY dd.department_name, de.job_level
-                ORDER BY dd.department_name, de.job_level
+                GROUP BY
+                    de.department_name,
+                    de.job_level
+                ORDER BY
+                    de.department_name,
+                    de.job_level
             """)
         except RuntimeError:
             return []
@@ -726,7 +808,7 @@ class AnalyticsManager(BaseDAL):
                 SELECT
                     de.employee_sk,
                     CONCAT(de.first_name,' ',de.last_name) AS name,
-                    dd.department_name,
+                    de.department_name,
                     de.job_role, de.job_level,
                     de.monthly_income,
                     de.change_reason,
@@ -734,7 +816,6 @@ class AnalyticsManager(BaseDAL):
                     de.effective_end_date,
                     IF(de.is_current=1,'✅ Current','📜 History') AS status
                 FROM dim_employee de
-                JOIN dim_department dd ON dd.department_sk = de.department_sk
                 WHERE de.employee_id = %s
                 ORDER BY de.effective_start_date
             """, (employee_id,))
